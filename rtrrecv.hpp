@@ -98,7 +98,7 @@ static awaitable<void> make_connection(tcp::socket sock, const rtrrecv_options &
     }
     catch (...)
     {
-        // do nothing
+        log_error("connect failed");
     }
 }
 
