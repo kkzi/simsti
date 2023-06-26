@@ -12,3 +12,5 @@ Release
 *.user
 CMakeSettings.json
 .vscode
+zig-out
+zig-cache

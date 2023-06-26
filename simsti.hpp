@@ -3,7 +3,6 @@
 #include "sti.hpp"
 #include <boost/asio.hpp>
 #include <boost/endian/conversion.hpp>
-#include <boost/thread/sync_queue.hpp>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -136,21 +135,23 @@ private:
     {
         if (opts_.has_sti_head)
         {
+            // std::scoped_lock lock(mutex_);
             frame_queue_.push(frame);
         }
         else
         {
-            auto &&[field0, field1] = make_time_tag(opts_.time_code);
+            auto &&[field0, field1] = make_time_tag((uint8_t)opts_.time_code);
             std::vector<uint8_t> copied(frame.size() + 68, 0);
             store_big_s32(copied.data(), STI_HEAD);
-            store_big_s32(copied.data() + 1 * sizeof(int), copied.size());
+            store_big_s32(copied.data() + 1 * sizeof(int), (int)copied.size());
             store_big_u32(copied.data() + 3 * sizeof(int), field0);
             store_big_u32(copied.data() + 4 * sizeof(int), field1);
             store_big_s32(copied.data() + 5 * sizeof(int), count);
-            store_big_s32(copied.data() + 10 * sizeof(int), frame.size());
+            store_big_s32(copied.data() + 10 * sizeof(int), (int)frame.size());
             std::copy(frame.begin(), frame.end(), copied.begin() + 64);
             store_big_s32(copied.data() + copied.size() - 4, STI_TAIL);
 
+            // std::scoped_lock lock(mutex_);
             frame_queue_.push(copied);
         }
         timer_.cancel_one();
@@ -200,7 +201,6 @@ private:
     {
         try
         {
-            std::vector<uint8_t> frame;
             while (sock_.is_open())
             {
                 if (frame_queue_.empty())
@@ -208,11 +208,12 @@ private:
                     boost::system::error_code ec;
                     co_await timer_.async_wait(redirect_error(use_awaitable, ec));
                 }
-                else if (frame_queue_.wait_pull(frame) == boost::queue_op_status::success)
+                else
                 {
+                    const auto &frame = frame_queue_.front();
                     co_await boost::asio::async_write(sock_, buffer(frame), use_awaitable);
-
                     log_info("{:02X}", fmt::join(frame, " "));
+                    frame_queue_.pop();
                 }
             }
         }
@@ -243,7 +244,9 @@ private:
     steady_timer timer_;
     std::unique_ptr<std::thread> thread_;
     std::atomic<bool> interrupted_;
-    boost::sync_queue<std::vector<uint8_t>> frame_queue_;
+
+    std::mutex mutex_;
+    std::queue<std::vector<uint8_t>> frame_queue_;
 };
 
 static awaitable<void> run_listener(tcp::acceptor acceptor, simsti_options opts)
