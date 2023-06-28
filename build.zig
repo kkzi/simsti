@@ -43,4 +43,5 @@ pub fn build(b: *std.Build) void {
     }
 }
 
-// zig build -Dtarget=aarch64-linux -Doptimize=ReleaseFast
+// zig build -Doptimize=ReleaseFast  -Dtarget=aarch64-linux 
+// zig build -Doptimize=ReleaseSmall -Dtarget=x86-linux-musl --prefix-exe-dir out-linux
