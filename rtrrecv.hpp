@@ -24,6 +24,7 @@ static std::vector<uint8_t> make_tm_request(int channel, int cmd)
     constexpr size_t UNIT = sizeof(int);
     std::vector<uint8_t> request(16 * UNIT, 0);
     store_big_s32(request.data() + 0 * UNIT, STI_HEAD);
+    store_big_s32(request.data() + 1 * UNIT, request.size());
     store_big_s32(request.data() + 3 * UNIT, channel);
     store_big_s32(request.data() + 5 * UNIT, cmd);
     store_big_s32(request.data() + 15 * UNIT, STI_TAIL);
