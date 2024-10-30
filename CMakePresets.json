@@ -1,0 +1,83 @@
+{
+    "version": 8,
+    "configurePresets": [
+        {
+            "name": "zig",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_INSTALL_PREFIX": "${sourceDir}/build/install/${presetName}"
+            }
+        },
+        {
+            "name": "zig-debug",
+            "inherits": [
+                "zig"
+            ],
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_TOOLCHAIN_FILE": "$env{OneDrive}/app/zig-cross/cmake1/zig-toolchain-win64.cmake"
+            }
+        },
+        {
+            "name": "zig-release",
+            "inherits": [
+                "zig"
+            ],
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_TOOLCHAIN_FILE": "$env{OneDrive}/app/zig-cross/cmake1/zig-toolchain-win64.cmake"
+            }
+        },
+        {
+            "name": "arm-linux-release",
+            "inherits": [
+                "zig"
+            ],
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_TOOLCHAIN_FILE": "$env{OneDrive}/app/zig-cross/cmake1/zig-toolchain-aarch64.cmake"
+            }
+        },
+        {
+            "name": "x64-linux-release",
+            "inherits": [
+                "zig"
+            ],
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_TOOLCHAIN_FILE": "$env{OneDrive}/app/zig-cross/cmake1/zig-toolchain-gnu64.cmake"
+            }
+        },
+        {
+            "name": "cl",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "cl",
+                "CMAKE_CXX_COMPILER": "cl"
+            }
+        },
+        {
+            "name": "x64-debug",
+            "inherits": [
+                "cl"
+            ],
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "x64-release",
+            "inherits": [
+                "cl"
+            ],
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        }
+    ]
+}

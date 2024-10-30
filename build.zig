@@ -1,12 +1,11 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    b.vcpkg_root = .{ .found = "D:/Local/vcpkg-latest/" };
-
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
     const apps = .{ "simsti", "rtrrecv" };
+    const flags = &.{"-std=c++20"};
     inline for (apps) |name| {
         const exe = b.addExecutable(.{
             .name = name,
@@ -23,16 +22,20 @@ pub fn build(b: *std.Build) void {
         exe.linkLibC();
         exe.linkLibCpp();
 
-        if (target.isWindows()) {
-            exe.linkSystemLibraryName("ws2_32");
-            exe.linkSystemLibraryName("Mswsock");
-            exe.addLibraryPath("D:/Local/boost_1_81_0/lib64-msvc-14.2");
+        if (target.result.os.tag == .windows) {
+            exe.linkSystemLibrary("ws2_32");
+            exe.linkSystemLibrary("Mswsock");
+
+            // const boost_dir = std.c.getenv("BOOST_LATEST");
+            // exe.addIncludePath(std.c.getenv("SIMPLE_CPP"));
+            // exe.addIncludePath(std.c.getenv("VCPKG_LATEST") + "");
+            // exe.addLibraryPath(boost_dir + "/lib64-msvc-14.2");
         }
-        exe.addIncludePath("D:/Code/simple");
-        exe.addIncludePath("D:/Local/boost_1_81_0");
-        exe.addIncludePath("D:/Local/vcpkg-latest/installed/x64-windows/include/");
+        exe.addIncludePath(.{ .cwd_relative = "D:/Local/boost_1_84_0/" });
+        exe.addIncludePath(.{ .cwd_relative = "D:/Code/simple/" });
+        exe.addIncludePath(.{ .cwd_relative = "D:/Local/vcpkg-latest/installed/x64-windows/include/" });
         const cpps = std.fmt.allocPrint(std.heap.page_allocator, "{s}.cpp", .{name}) catch "";
-        exe.addCSourceFiles(&.{cpps}, &.{"-std=c++20"});
+        exe.addCSourceFile(.{ .file = b.path(cpps), .flags = flags });
 
         b.installArtifact(exe);
         const run_cmd = b.addRunArtifact(exe);
@@ -43,5 +46,5 @@ pub fn build(b: *std.Build) void {
     }
 }
 
-// zig build -Doptimize=ReleaseFast  -Dtarget=aarch64-linux 
+// zig build -Doptimize=ReleaseFast  -Dtarget=aarch64-linux
 // zig build -Doptimize=ReleaseSmall -Dtarget=x86-linux-musl --prefix-exe-dir out-linux

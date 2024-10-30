@@ -6,11 +6,13 @@ enc_temp_folder
 Debug
 Release
 .vs
+.cache
 .idea
 *.ilk
 *.log
 *.user
-CMakeSettings.json
 .vscode
+.zig-cache
 zig-out
 zig-cache
+CMakeSettings.json

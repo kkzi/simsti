@@ -1,19 +1,19 @@
 #pragma once
 
 #include "sti.hpp"
+#include <algorithm>
 #include <boost/asio.hpp>
 #include <boost/endian/conversion.hpp>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <map>
 #include <memory>
 #include <mutex>
-#include <queue>
-#include <ranges>
+#include <simple/simple.hpp>
+#include <simple/tcp_server.hpp>
 #include <simple/use_spdlog.hpp>
-#include <vector>
+#include <thread>
 
 using namespace std::chrono;
 using namespace boost::asio;
@@ -22,72 +22,96 @@ using namespace boost::endian;
 
 struct simsti_options
 {
-    size_t framelen{ 0 };
     std::string input{ "" };
-    size_t fps{ 2 };
-    uint16_t tm_channel{ 0 };
-    uint16_t time_code{ 0 };
-    uint16_t port{ 3070 };
+    u64 framelen{ 128 };
+    u64 frame_offset{ 0 };
+    u64 fps{ 2 };
+    u16 tm_channel{ 0 };
+    u16 time_code{ 0 };
+    u16 port{ 3070 };
+
+    bool file_valid{ false };
     bool has_sti_head{ false };
 };
 
-struct tm_session;
-
-template <class T>
-struct keeper
+struct frame_generator
 {
-    void add(std::shared_ptr<T> ptr)
+    virtual ~frame_generator() = default;
+    virtual bool fill_frame(std::string &frame) = 0;
+};
+
+struct file_frame_generator : public frame_generator
+{
+    file_frame_generator(std::string_view input, size_t offset)
+        : input_(input)
+        , offset_(offset)
+        , file_(std::ifstream(input_, std::ios::binary))
     {
-        std::scoped_lock lock(mutex_);
-        arr_.push_back(ptr);
     }
 
-    void remove(std::shared_ptr<T> ptr)
+    bool fill_frame(std::string &frame) override
     {
-        std::scoped_lock lock(mutex_);
-        std::erase(arr_, ptr);
+        if (!file_.good())
+        {
+            log_error("file {} not exists", input_);
+            return false;
+        }
+        if (offset_ > 0)
+        {
+            file_.read((char *)frame.data(), offset_);
+        }
+        auto bytes = frame.size();
+        file_.read((char *)frame.data(), bytes);
+        if (file_.gcount() != bytes)
+        {
+            file_.clear();
+            file_.seekg(0, std::ios::beg);
+            log_info("file {} loop {}", input_, ++loop_count_);
+        }
+        return true;
     }
 
 private:
-    std::mutex mutex_;
-    std::vector<std::shared_ptr<T>> arr_;
+    std::string input_;
+    u64 offset_{ 0 };
+    u64 loop_count_{ 0 };
+    std::ifstream file_;
 };
 
-struct tm_session : public std::enable_shared_from_this<tm_session>
+struct sequence_frame_generator : public frame_generator
 {
-    tm_session(std::shared_ptr<keeper<tm_session>> keeper, tcp::socket sock, simsti_options opts)
-        : keeper_(std::move(keeper))
-        , sock_(std::move(sock))
-        , opts_(std::move(opts))
-        , timer_(sock_.get_executor())
+    bool fill_frame(std::string &frame) override
     {
-        timer_.expires_at(std::chrono::steady_clock::time_point::max());
+        std::fill(frame.begin(), frame.end(), count_++);
+        return true;
+    }
 
-        auto ep = sock_.remote_endpoint();
-        addr_ = fmt::format("{}:{}", ep.address().to_string(), ep.port());
+private:
+    u8 count_{ 0 };
+};
+
+struct sti_session : public std::enable_shared_from_this<sti_session>
+{
+    sti_session(std::shared_ptr<tcp_session> ss, simsti_options opts)
+        : raw_(ss)
+        , opts_(std::move(opts))
+    {
+        addr_ = raw_->peer_address();
         log_info("new connection from {}", addr_);
     }
 
-    ~tm_session()
+    ~sti_session()
     {
         log_info("disconnect from {}", addr_);
+        stop();
     }
 
     void start()
     {
-        co_spawn(
-            sock_.get_executor(),
-            [self = shared_from_this()] {
-                return self->reader();
-            },
-            detached);
-
-        co_spawn(
-            sock_.get_executor(),
-            [self = shared_from_this()] {
-                return self->writer();
-            },
-            detached);
+        interrupted_ = false;
+        thread_ = std::thread([this] {
+            generate_tm_frames();
+        });
     }
 
 private:
@@ -100,30 +124,27 @@ private:
         auto t0 = system_clock::now();
         auto last = t0;
         auto count = 0;
-        std::ifstream file(input, std::ios::binary);
-        if (!file.good())
-        {
-            log_error("file {} not exists", input);
-            return;
-        }
 
-        std::vector<uint8_t> frame(framelen);
-        while (!interrupted_ && sock_.is_open())
+        std::unique_ptr<frame_generator> gen;
+        if (opts_.file_valid)
+            gen = std::make_unique<file_frame_generator>(opts_.input, opts_.frame_offset);
+        else
+            gen = std::make_unique<sequence_frame_generator>();
+        std::string frame(framelen, 0);
+        while (!interrupted_)
         {
             auto now = system_clock::now();
             if (duration_cast<microseconds>(now - last).count() < gap)
             {
-                if (opts_.fps <= 10) std::this_thread::sleep_for(1us);
+                if (opts_.fps <= 10) std::this_thread::sleep_for(1ms);
                 continue;
             }
             last = now;
 
-            file.read((char *)frame.data(), framelen);
-            if (file.gcount() != framelen)
+            auto ok = gen->fill_frame(frame);
+            if (!ok)
             {
-                file.clear();
-                file.seekg(0, std::ios::beg);
-                continue;
+                break;
             }
             push_frame(count, frame);
             count++;
@@ -131,163 +152,127 @@ private:
         log_info("fps={:.2f}", (double)count / std::max<size_t>(1, duration_cast<seconds>(last - t0).count()));
     }
 
-    void push_frame(uint32_t count, const std::vector<uint8_t> &frame)
+    void push_frame(uint32_t count, const std::string &frame)
     {
         if (opts_.has_sti_head)
         {
-            // std::scoped_lock lock(mutex_);
-            frame_queue_.push(frame);
+            raw_->send(frame);
         }
         else
         {
             auto &&[field0, field1] = make_time_tag((uint8_t)opts_.time_code);
-            std::vector<uint8_t> copied(frame.size() + 68, 0);
-            store_big_s32(copied.data(), STI_HEAD);
-            store_big_s32(copied.data() + 1 * sizeof(int), (int)copied.size());
-            store_big_u32(copied.data() + 3 * sizeof(int), field0);
-            store_big_u32(copied.data() + 4 * sizeof(int), field1);
-            store_big_s32(copied.data() + 5 * sizeof(int), count);
-            store_big_s32(copied.data() + 10 * sizeof(int), (int)frame.size());
+            std::string copied(frame.size() + 68, 0);
+            store_big_s32((uint8_t *)copied.data(), STI_HEAD);
+            store_big_s32((uint8_t *)copied.data() + 1 * sizeof(int), (int)copied.size());
+            store_big_u32((uint8_t *)copied.data() + 3 * sizeof(int), field0);
+            store_big_u32((uint8_t *)copied.data() + 4 * sizeof(int), field1);
+            store_big_s32((uint8_t *)copied.data() + 5 * sizeof(int), count);
+            store_big_s32((uint8_t *)copied.data() + 10 * sizeof(int), (int)frame.size());
             std::copy(frame.begin(), frame.end(), copied.begin() + 64);
-            store_big_s32(copied.data() + copied.size() - 4, STI_TAIL);
-
-            // std::scoped_lock lock(mutex_);
-            frame_queue_.push(copied);
-        }
-        timer_.cancel_one();
-    }
-
-    awaitable<void> reader()
-    {
-        try
-        {
-            for (std::vector<uint8_t> frame;;)
-            {
-                co_await async_read(sock_, dynamic_buffer(frame, 64), use_awaitable);
-
-                if (auto head = load_big_s32(frame.data()); head != STI_HEAD)
-                {
-                    stop();
-                    co_return;
-                }
-
-                switch (auto data_flow = load_big_s32(frame.data() + 20); data_flow)
-                {
-                case 0:
-                case 1:
-                case 2:
-                case 4:
-                case 5:
-                case 6:
-                    thread_ = std::make_unique<std::thread>([self = shared_from_this()] {
-                        self->generate_tm_frames();
-                    });
-                    break;
-                case 0x80:
-                default:
-                    stop();
-                    break;
-                }
-                frame.clear();
-            }
-        }
-        catch (std::exception &)
-        {
-            stop();
-        }
-    }
-
-    awaitable<void> writer()
-    {
-        try
-        {
-            while (sock_.is_open())
-            {
-                if (frame_queue_.empty())
-                {
-                    boost::system::error_code ec;
-                    co_await timer_.async_wait(redirect_error(use_awaitable, ec));
-                }
-                else
-                {
-                    const auto &frame = frame_queue_.front();
-                    co_await boost::asio::async_write(sock_, buffer(frame), use_awaitable);
-                    log_info("{:02X}", fmt::join(frame, " "));
-                    frame_queue_.pop();
-                }
-            }
-        }
-        catch (std::exception &)
-        {
-            stop();
+            store_big_s32((uint8_t *)copied.data() + copied.size() - 4, STI_TAIL);
+            raw_->send(copied);
         }
     }
 
     void stop()
     {
         interrupted_ = true;
-        if (thread_ && thread_->joinable())
+        if (thread_.joinable())
         {
-            thread_->join();
+            thread_.join();
         }
-
-        sock_.close();
-        timer_.cancel();
-        keeper_->remove(shared_from_this());
     }
 
 private:
-    std::shared_ptr<keeper<tm_session>> keeper_;
+    std::shared_ptr<tcp_session> raw_;
     simsti_options opts_;
-    tcp::socket sock_;
     std::string addr_;
-    steady_timer timer_;
-    std::unique_ptr<std::thread> thread_;
+    std::thread thread_;
     std::atomic<bool> interrupted_;
-
-    std::mutex mutex_;
-    std::queue<std::vector<uint8_t>> frame_queue_;
 };
 
-static awaitable<void> run_listener(tcp::acceptor acceptor, simsti_options opts)
+class sti_server
 {
-    auto kpr = std::make_shared<keeper<tm_session>>();
-    for (;;)
+public:
+    void run(simsti_options opts)
     {
-        auto client = co_await acceptor.async_accept(use_awaitable);
-        auto session = std::make_shared<tm_session>(kpr, std::move(client), opts);
-        session->start();
-        kpr->add(session);
-    }
-}
+        if (opts.time_code != 0 && opts.time_code != 3)
+        {
+            log_error("time code only supported 0(s+ms) or 3(s+us)");
+            return;
+        }
+        opts.file_valid = std::filesystem::exists(opts.input);
+        if (!opts.file_valid)
+        {
+            log_warn("file is empty or not exists, use frame generator with {} bytes", opts.framelen);
+        }
+        log_info("listening at {}", opts.port);
 
-static void run_simsti(simsti_options opts)
-{
-    if (opts.time_code != 0 && opts.time_code != 3)
+        if (auto file = std::ifstream(opts.input, std::ios::binary); file.good())
+        {
+            int head = 0;
+            file.read((char *)&head, sizeof(head));
+            opts.has_sti_head = head == STI_HEAD;
+            file.close();
+        }
+
+        boost::asio::io_context io;
+        tcp_server server(io, { tcp::v4(), opts.port });
+        server
+            .on_connect([&](auto &&ss) {
+                // sessions[ss] = nullptr;
+            })
+            .on_disconnect([&](auto &&ss) {
+                close_client(ss);
+            })
+            .on_received([opts, this](auto &&ss, auto &&msg) {
+                if (auto head = load_big_s32((uint8_t *)msg.data()); head != STI_HEAD)
+                {
+                    // stop();
+                    ss->stop();
+                    return;
+                }
+
+                switch (auto data_flow = load_big_s32((uint8_t *)msg.data() + 20); data_flow)
+                {
+                case 0:
+                case 1:
+                case 2:
+                case 4:
+                case 5:
+                    make_client(ss, opts);
+                    break;
+                case 0x80:
+                default:
+                    close_client(ss);
+                    break;
+                }
+            })
+            .start();
+
+        boost::asio::signal_set signals(io, SIGINT, SIGTERM);
+        signals.async_wait([&](auto, auto) {
+            io.stop();
+        });
+        io.run();
+    }
+
+private:
+    void make_client(const std::shared_ptr<tcp_session> &ss, const simsti_options &opts)
     {
-        log_error("time code only supported 0(s+ms) or 3(s+us)");
-        return;
+        std::scoped_lock lock(mutex_);
+        auto client = std::make_shared<sti_session>(ss, opts);
+        client->start();
+        sessions_[ss] = client;
     }
-    if (!std::filesystem::exists(opts.input))
+
+    void close_client(const std::shared_ptr<tcp_session> &ss)
     {
-        log_error("file {} not exists", opts.input);
-        return;
-    }
-    if (auto file = std::ifstream(opts.input, std::ios::binary); file.good())
-    {
-        int head = 0;
-        file.read((char *)&head, sizeof(head));
-        opts.has_sti_head = head == STI_HEAD;
+        std::scoped_lock lock(mutex_);
+        if (sessions_.contains(ss)) sessions_.erase(ss);
     }
 
-    log_info("listening at {}", opts.port);
-
-    io_context io(1);
-    co_spawn(io, run_listener(tcp::acceptor(io, { tcp::v4(), opts.port }), std::move(opts)), detached);
-
-    boost::asio::signal_set signals(io, SIGINT, SIGTERM);
-    signals.async_wait([&](auto, auto) {
-        io.stop();
-    });
-    io.run();
-}
+private:
+    std::mutex mutex_;
+    std::map<std::shared_ptr<tcp_session>, std::shared_ptr<sti_session>> sessions_;
+};

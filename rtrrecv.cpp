@@ -11,17 +11,22 @@ using namespace std::chrono;
 struct options
 {
     std::string addr{ "127.0.0.1:3070" };
-    int mode{ 1 };
+    u16 mode{ 1 };
+    u16 channel{ 0 };
+    u16 keep_sti{ 0 };
 };
 
 int main(int argc, char **argv)
 {
     init_logger("");
 
-    auto opts = flags<options>("rtrrecv", {
-                                              { "-addr", "remote address (ip:port), default 127.0.0.1:3070", &options::addr },
-                                              { "-mode", "output mode (1: console, 2: file), default 1", &options::mode },
-                                          })(argc, argv);
+    auto opts = flags<options>("rtrrecv", "v1",
+        {
+            { "-addr", "remote address (ip:port)", &options::addr },
+            { "-mode", "output mode (1: console, 2: file, 3: console and file)", &options::mode },
+            { "-channel", "data channel number", &options::channel },
+            { "-keepsti", "keep sti frame head and tail or not(1: yes, 0: no)", &options::keep_sti },
+        })(argc, argv);
 
     auto parts = str::split(opts.addr, ":", false);
     if (parts.size() != 2)
@@ -34,7 +39,7 @@ int main(int argc, char **argv)
     auto process_param = [&file, mode = opts.mode](auto &&frame) {
         if ((mode & 1) > 0)
         {
-            log_info("{:02X}", fmt::join(frame, " "));
+            log_info("<{}B> {:02X}", frame.size(), fmt::join(frame, " "));
         }
         if ((mode & 2) > 0)
         {
@@ -49,7 +54,9 @@ int main(int argc, char **argv)
 
     run_rtrrecv({
         .addr = std::string{ parts.at(0) },
-        .port = str::to_number<uint16_t>(parts.at(1)),
+        .port = str::to_number<u16>(parts.at(1)),
+        .channel = opts.channel,
+        .keep_sti = opts.keep_sti > 0,
         .frame_func = std::move(process_param),
     });
 
